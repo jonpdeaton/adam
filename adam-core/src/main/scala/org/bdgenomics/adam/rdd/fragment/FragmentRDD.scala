@@ -341,7 +341,8 @@ sealed abstract class FragmentRDD extends AvroRecordGroupGenomicDataset[Fragment
    *   reads are NOT filtered out.
    */
   def markDuplicates(): FragmentRDD = MarkDuplicatesInDriver.time {
-    replaceRdd(MarkDuplicates(this))
+    val markedFragmentDataset = MarkDuplicates(dataset, recordGroups)
+    replaceRdd(markedFragmentDataset.rdd.map(_.toAvro))
   }
 
   /**
