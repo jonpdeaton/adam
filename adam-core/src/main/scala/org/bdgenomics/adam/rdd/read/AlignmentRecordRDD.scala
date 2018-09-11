@@ -986,7 +986,7 @@ sealed abstract class AlignmentRecordRDD extends AvroRecordGroupGenomicDataset[A
    */
   def markDuplicates(): AlignmentRecordRDD = MarkDuplicatesInDriver.time {
     val markedRecordsDs = MarkDuplicates(dataset, recordGroups)
-    replaceRdd(markedRecordsDs.rdd.map(_.toAvro))
+    replaceRdd(MarkDuplicates(this.rdd, this.recordGroups))
   }
 
   /**
