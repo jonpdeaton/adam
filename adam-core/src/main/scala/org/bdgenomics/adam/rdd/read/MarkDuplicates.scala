@@ -39,12 +39,6 @@ import scala.collection.JavaConversions._
 
 private[rdd] object MarkDuplicates extends Serializable with Logging {
 
-  //  def apply[T](sequencingRecords: Dataset[T], recordGroupDictionary: RecordGroupDictionary): Dataset[T] = {
-  //    import sequencingRecords.sparkSession.implicits._
-  //    checkRecordGroups(recordGroupDictionary)
-  //    val libDf = libraryDf(recordGroupDictionary, sequencingRecords.sparkSession)
-  //  }
-
   /**
    * Mark alignment records as PCR duplicates.
    * Among all reads from fragments that have the same left and right positions, duplicates
