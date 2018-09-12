@@ -22,7 +22,11 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.expressions.Window
 import org.bdgenomics.formats.avro.{ AlignmentRecord, Fragment }
 import org.apache.spark.sql.functions.{ countDistinct, first, row_number, sum, when }
-import org.bdgenomics.adam.models.RecordGroupDictionary
+import org.bdgenomics.adam.instrumentation.Timers._
+import org.bdgenomics.adam.models.{
+  RecordGroupDictionary,
+  ReferencePosition
+}
 import org.bdgenomics.adam.rdd.ADAMContext._
 import org.bdgenomics.adam.rdd.fragment.{ DatasetBoundFragmentRDD, FragmentRDD, RDDBoundFragmentRDD }
 import org.bdgenomics.adam.sql.{ AlignmentRecord => AlignmentRecordProduct, Fragment => FragmentProduct }
@@ -48,14 +52,20 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
    *         duplicates having been marked in the `duplicateRead` field.
    */
   def apply(alignmentRecords: RDD[AlignmentRecord],
-            recordGroupDictionary: RecordGroupDictionary): RDD[AlignmentRecord] = {
+            recordGroupDictionary: RecordGroupDictionary, useSQL: Option[Boolean]): RDD[AlignmentRecord] = {
 
-    val sqlContext = SQLContext.getOrCreate(alignmentRecords.context)
-    import sqlContext.implicits._
-    val dataset = sqlContext.createDataset(alignmentRecords.map(AlignmentRecordProduct.fromAvro))
+    val withSQL = useSQL.getOrElse(alignmentRecords.count() >= 1000000)
 
-    MarkDuplicates(dataset, recordGroupDictionary)
-      .rdd.map(_.toAvro)
+    if (withSQL) {
+      val sqlContext = SQLContext.getOrCreate(alignmentRecords.context)
+      import sqlContext.implicits._
+      val dataset = sqlContext.createDataset(alignmentRecords.map(AlignmentRecordProduct.fromAvro))
+      MarkDuplicates(dataset, recordGroupDictionary)
+        .rdd.map(_.toAvro)
+    } else {
+      markBuckets(SingleReadBucket(alignmentRecords), recordGroupDictionary)
+        .flatMap(_.allReads)
+    }
   }
 
   /**
@@ -68,14 +78,20 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
    *         within the fragments having been marked as duplicates according to the duplciate marking algorithm
    */
   def apply(fragments: RDD[Fragment],
-            recordGroupDictionary: RecordGroupDictionary)(implicit dummy: DummyImplicit): RDD[Fragment] = {
+            recordGroupDictionary: RecordGroupDictionary, useSQL: Option[Boolean])(implicit dummy: DummyImplicit): RDD[Fragment] = {
+    val withSQL = useSQL.getOrElse(fragments.count() >= 1000000)
 
-    val sqlContext = SQLContext.getOrCreate(fragments.context)
-    import sqlContext.implicits._
-    val dataset = sqlContext.createDataset(fragments.map(FragmentProduct.fromAvro))
+    if (withSQL) {
+      val sqlContext = SQLContext.getOrCreate(fragments.context)
+      import sqlContext.implicits._
+      val dataset = sqlContext.createDataset(fragments.map(FragmentProduct.fromAvro))
 
-    MarkDuplicates(dataset, recordGroupDictionary)
-      .rdd.map(_.toAvro)
+      MarkDuplicates(dataset, recordGroupDictionary)
+        .rdd.map(_.toAvro)
+    } else {
+      markBuckets(fragments.map(f => SingleReadBucket(f)), recordGroupDictionary)
+        .map(_.toFragment)
+    }
   }
 
   /**
@@ -266,6 +282,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
   /**
    * Calculates the number of distinct right positions for each group of left reference positions
+   *
    * @param fragmentsDf DataFrame of fragments containing left and right reference positions
    * @return DataFrame indicating for each left-reference position the group "groupCount" which is equal to the
    *         number of distinct right reference positions among all fragments with the same left
@@ -283,6 +300,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
    * from a DataFrame specifying which fragments found in the collection of alignment records are duplicates.
    * Each read will be marked as a duplicate if it is a primary alignments and part of a duplicate fragment
    * or if it is a mapped read but not a primary alignment.
+   *
    * Unmapped reads will not be marked as duplicate.
    * @param alignmentRecords Dataset of AlignmentRecords
    * @param duplicatesDf DataFrame containing information about each
@@ -300,6 +318,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
   /**
    * Adds information about which fragments are duplicates given in `duplicatesDf` to a dataset of alignment records
+   *
    * @param alignmentRecords Dataset of alignment records to add duplicate fragment info to
    * @param duplicatesDf DataFrame with columns "recordGroupName", "readName" and "duplicateFragment" indicating
    *                     for each fragment (identified by "record
@@ -460,6 +479,104 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
             (pos, cigarEl) => pos - cigarEl.getLength
           })
         })
+    }
+  }
+
+  private def markBuckets(rdd: RDD[SingleReadBucket],
+                          recordGroups: RecordGroupDictionary): RDD[SingleReadBucket] = {
+
+    // Group by library and left position
+    def leftPositionAndLibrary(p: (ReferencePositionPair, SingleReadBucket),
+                               rgd: RecordGroupDictionary): (Option[ReferencePosition], String) = {
+      if (p._2.allReads.head.getRecordGroupName != null) {
+        (p._1.read1refPos, rgd(p._2.allReads.head.getRecordGroupName).library.orNull)
+      } else {
+        (p._1.read1refPos, null)
+      }
+    }
+
+    // Group by right position
+    def rightPosition(p: (ReferencePositionPair, SingleReadBucket)): Option[ReferencePosition] = {
+      p._1.read2refPos
+    }
+
+    rdd.keyBy(ReferencePositionPair(_))
+      .groupBy(leftPositionAndLibrary(_, recordGroups))
+      .flatMap(kv => PerformDuplicateMarking.time {
+
+        val leftPos: Option[ReferencePosition] = kv._1._1
+        val readsAtLeftPos: Iterable[(ReferencePositionPair, SingleReadBucket)] = kv._2
+
+        leftPos match {
+
+          // These are all unmapped reads. There is no way to determine if they are duplicates
+          case None =>
+            markReads(readsAtLeftPos, areDups = false)
+
+          // These reads have their left position mapped
+          case Some(leftPosWithOrientation) =>
+
+            val readsByRightPos = readsAtLeftPos.groupBy(rightPosition)
+
+            val groupCount = readsByRightPos.size
+
+            readsByRightPos.foreach(e => {
+
+              val rightPos = e._1
+              val reads = e._2
+
+              val groupIsFragments = rightPos.isEmpty
+
+              // We have no pairs (only fragments) if the current group is a group of fragments
+              // and there is only one group in total
+              val onlyFragments = groupIsFragments && groupCount == 1
+
+              // If there are only fragments then score the fragments. Otherwise, if there are not only
+              // fragments (there are pairs as well) mark all fragments as duplicates.
+              // If the group does not contain fragments (it contains pairs) then always score it.
+              if (onlyFragments || !groupIsFragments) {
+                // Find the highest-scoring read and mark it as not a duplicate. Mark all the other reads in this group as duplicates.
+                val highestScoringRead = reads.max(ScoreOrdering)
+                markReadsInBucket(highestScoringRead._2, primaryAreDups = false, secondaryAreDups = true)
+                markReads(reads, primaryAreDups = true, secondaryAreDups = true, ignore = Some(highestScoringRead))
+              } else {
+                markReads(reads, areDups = true)
+              }
+            })
+        }
+        readsAtLeftPos.map(_._2)
+      })
+  }
+
+  private def markReadsInBucket(bucket: SingleReadBucket, primaryAreDups: Boolean, secondaryAreDups: Boolean) {
+    bucket.primaryMapped.foreach(read => {
+      read.setDuplicateRead(primaryAreDups)
+    })
+    bucket.secondaryMapped.foreach(read => {
+      read.setDuplicateRead(secondaryAreDups)
+    })
+    bucket.unmapped.foreach(read => {
+      read.setDuplicateRead(false)
+    })
+  }
+
+  private def markReads(reads: Iterable[(ReferencePositionPair, SingleReadBucket)], areDups: Boolean) {
+    markReads(reads, primaryAreDups = areDups, secondaryAreDups = areDups, ignore = None)
+  }
+
+  private def markReads(reads: Iterable[(ReferencePositionPair, SingleReadBucket)],
+                        primaryAreDups: Boolean, secondaryAreDups: Boolean,
+                        ignore: Option[(ReferencePositionPair, SingleReadBucket)] = None): Unit = MarkReads.time {
+    reads.foreach(read => {
+      if (!ignore.contains(read))
+        markReadsInBucket(read._2, primaryAreDups, secondaryAreDups)
+    })
+  }
+
+  private object ScoreOrdering extends Ordering[(ReferencePositionPair, SingleReadBucket)] {
+    override def compare(x: (ReferencePositionPair, SingleReadBucket), y: (ReferencePositionPair, SingleReadBucket)): Int = {
+      // This is safe because scores are Ints
+      scoreBucket(x._2) - scoreBucket(y._2)
     }
   }
 

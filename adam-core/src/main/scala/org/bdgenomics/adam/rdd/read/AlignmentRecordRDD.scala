@@ -993,7 +993,7 @@ sealed abstract class AlignmentRecordRDD extends AvroRecordGroupGenomicDataset[A
    *   reads are NOT filtered out.
    */
   def markDuplicates(): AlignmentRecordRDD = MarkDuplicatesInDriver.time {
-    replaceRdd(MarkDuplicates(this.rdd, this.recordGroups))
+    replaceRdd(MarkDuplicates(this.rdd, this.recordGroups, None))
   }
 
   /**
