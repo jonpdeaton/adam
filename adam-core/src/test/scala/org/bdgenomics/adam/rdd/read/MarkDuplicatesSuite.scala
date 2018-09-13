@@ -211,6 +211,42 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
     assert(marked.filter(_.getReadName == "rightUnmapped").filter(!_.getReadMapped).forall(!_.getDuplicateRead))
   }
 
+  sparkTest("fragments without read 1") {
+    val mappedRight = for (i <- 0 until 10) yield {
+      createMappedRead("1", 100, 142,
+        readInFragment = 1, readName = "group%d".format(i))
+    }
+    val marked = markDuplicateFragments(mappedRight: _*)
+    assert(marked.size == mappedRight.size)
+    assert(marked.forall(!_.getDuplicateRead))
+  }
+
+  sparkTest("fragments without read 1 multiple") {
+    val mappedRight = for (i <- 0 until 10) yield {
+      createMappedRead("1", 100, 142,
+        readInFragment = 1, readName = "group%d".format(i))
+    }
+
+    val mappedRight2 = for (i <- 0 until 10) yield {
+      createMappedRead("1", 100, 142,
+        readInFragment = 1, readName = "group2_%d".format(i), isPrimaryAlignment = false)
+    }
+    val marked = markDuplicateFragments(mappedRight ++ mappedRight2: _*)
+    assert(marked.size == mappedRight.size + mappedRight2.size)
+    assert(marked.forall(!_.getDuplicateRead))
+  }
+
+  sparkTest("fragments without read 1 secondary alignment") {
+    val mappedRight = for (i <- 0 until 10) yield {
+      createMappedRead("1", 100, 142,
+        readInFragment = 1, readName = "group%d".format(i), isPrimaryAlignment = false)
+    }
+
+    val marked = markDuplicateFragments(mappedRight: _*)
+    assert(marked.size == mappedRight.size)
+    assert(marked.forall(_.getDuplicateRead))
+  }
+
   sparkTest("read pairs") {
     val poorPairs = for (
       i <- 0 until 10;
