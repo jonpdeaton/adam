@@ -267,7 +267,6 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
   /**
    * Calculates the number of distinct right positions for each group of left reference positions
-   *
    * @param fragmentsDf DataFrame of fragments containing left and right reference positions
    * @return DataFrame indicating for each left-reference position the group "groupCount" which is equal to the
    *         number of distinct right reference positions among all fragments with the same left
@@ -285,7 +284,6 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
    * from a DataFrame specifying which fragments found in the collection of alignment records are duplicates.
    * Each read will be marked as a duplicate if it is a primary alignments and part of a duplicate fragment
    * or if it is a mapped read but not a primary alignment.
-   *
    * Unmapped reads will not be marked as duplicate.
    * @param alignmentRecords Dataset of AlignmentRecords
    * @param duplicatesDf DataFrame containing information about each
@@ -302,8 +300,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
   }
 
   /**
-   * Adds information about which fragments are duplicates given in `duplicatesDf` to a Dataset of alignment records
-   *
+   * Adds information about which fragments are duplicates given in `duplicatesDf` to a dataset of alignment records
    * @param alignmentRecords Dataset of alignment records to add duplicate fragment info to
    * @param duplicatesDf DataFrame with columns "recordGroupName", "readName" and "duplicateFragment" indicating
    *                     for each fragment (identified by "record

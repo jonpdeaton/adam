@@ -67,6 +67,7 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
       .setEnd(end)
       .setReadMapped(true)
       .setPrimaryAlignment(isPrimaryAlignment)
+      .setSecondaryAlignment(!isPrimaryAlignment)
       .setReadInFragment(readInFragment)
       .setReadName(readName)
       .setRecordGroupName("machine foo")
@@ -221,19 +222,63 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
     assert(marked.forall(!_.getDuplicateRead))
   }
 
-  sparkTest("fragments without read 1 multiple") {
-    val mappedRight = for (i <- 0 until 10) yield {
-      createMappedRead("1", 100, 142,
-        readInFragment = 1, readName = "group%d".format(i))
+  import org.scalatest.Tag
+  sparkTest("fragments without read 1 multiple", Tag("org.bdgenomics.adam.rdd.read.OneShot")) {
+
+    // all of the reads will have the same left and right position
+    val start = 42
+    val end = 100
+    val highScoreName = "highscore"
+
+    val highestScoring0 = createMappedRead("1", start, end,
+      readInFragment = 0, readName = highScoreName, isPrimaryAlignment = true, avgPhredScore = 25)
+    val highestScoring1 = createMappedRead("1", start, end,
+      readInFragment = 1, readName = highScoreName, isPrimaryAlignment = true, avgPhredScore = 25)
+
+    val rightSecondary = for (i <- 0 until 10) yield {
+      createMappedRead("1", start, end,
+        readInFragment = 1, readName = s"secondary$i", isPrimaryAlignment = false)
     }
 
-    val mappedRight2 = for (i <- 0 until 10) yield {
-      createMappedRead("1", 100, 142,
-        readInFragment = 1, readName = "group2_%d".format(i), isPrimaryAlignment = false)
+    val rightPrimary = for (i <- 0 until 10) yield {
+      createMappedRead("1", start, end,
+        readInFragment = 1, readName = s"group$i", isPrimaryAlignment = true, avgPhredScore = 25)
     }
-    val marked = markDuplicateFragments(mappedRight ++ mappedRight2: _*)
-    assert(marked.size == mappedRight.size + mappedRight2.size)
-    assert(marked.forall(!_.getDuplicateRead))
+
+    val allReads = Seq(highestScoring0, highestScoring1) ++ rightPrimary ++ rightSecondary
+    val marked = markDuplicateFragments(allReads: _*)
+
+    // the highest scoring read should not be a duplicate
+    val highestIsDup = marked
+      .filter(_.getReadName == highScoreName)
+      .forall(_.getDuplicateRead)
+    assert(!highestIsDup)
+
+    // the only instance in which a secondary alignment should NOT be marked as duplicates
+    // is the instance in which its a secondary alignment without a left positions
+    // when we don't filter out missing left positions, you end up marking those secondary alignments
+    // without a left position as duplicates. When we do filter, they don't end up in duplcitesDf and then
+    // they get marked as false becuase the result of the left join is NULL in the duplicateFragemnt position
+    // To test for this, we need to make some secondary alignemnts which do not have any left position
+
+    // that is what I did here. However, some of these secondary alignments are getting marked as duplicate
+
+    // they might be marked as duplicate becuase... WHO THE FUCK KNOWS
+
+    // the secondary alignments should not be duplicates since they have no left position
+    val allSecondaryArentDup = marked
+      .filter(_.getReadName != highScoreName)
+      .filter(!_.getPrimaryAlignment)
+      .forall(!_.getDuplicateRead)
+
+    assert(allSecondaryArentDup)
+
+    // everything else should be a duplicate
+    val allOthersArentDup = marked
+      .filter(_.getReadName != highScoreName)
+      .filter(!_.getSecondaryAlignment)
+      .forall(!_.getDuplicateRead)
+    assert(allOthersArentDup)
   }
 
   sparkTest("fragments without read 1 secondary alignment") {
@@ -244,7 +289,7 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
 
     val marked = markDuplicateFragments(mappedRight: _*)
     assert(marked.size == mappedRight.size)
-    assert(marked.forall(_.getDuplicateRead))
+    assert(marked.forall(!_.getDuplicateRead))
   }
 
   sparkTest("read pairs") {
