@@ -92,14 +92,13 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
     checkRecordGroups(recordGroupDictionary)
 
     val libDf = libraryDf(recordGroupDictionary, alignmentRecords.sparkSession)
-    val fragmentsDf = groupReadsByFragment(alignmentRecords)
+
+    val fragmentsDf = addFragmentInfo(alignmentRecords)
       .join(libDf, "recordGroupName")
 
-    // DataFrame containing all identified duplicates
-    val duplicatesDf = findDuplicates(fragmentsDf)
+    val groupCountedDf = addGroupCountInfo(fragmentsDf)
 
-    // mark the identified duplicates in the original Dataset and convert Spark SQL DataFrame back to RDD
-    updateDuplicates(alignmentRecords, duplicatesDf)
+    identifyDuplicates(groupCountedDf)
       .as[AlignmentRecordProduct]
   }
 
@@ -131,6 +130,88 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
     // update the field within the reads to reflect the identified duplicate reads
     updateDuplicateFragments(fragments, duplicatesDf)
+  }
+
+  private def addFragmentInfo(alignmentRecords: Dataset[AlignmentRecordProduct]): DataFrame = {
+    import alignmentRecords.sqlContext.implicits._
+
+    val fragmentWindow = Window.partitionBy('recordGroupName, 'readName)
+
+    // Read 1 reference position (contig name)
+    alignmentRecords.withColumn("read1contigName",
+      first(when('primaryAlignment and 'readInFragment === 0,
+        when('readMapped, 'contigName).otherwise('sequence)),
+        ignoreNulls = true) over fragmentWindow)
+
+      // Read 1 reference position (5' position)
+      .withColumn("read1fivePrimePosition",
+      first(when('primaryAlignment and 'readInFragment === 0,
+        when('readMapped, 'fivePrimePosition).otherwise(0L)),
+        ignoreNulls = true) over fragmentWindow)
+
+      // Read 1 reference position (strand)
+      .withColumn("read1strand",
+      first(when('primaryAlignment and 'readInFragment === 0,
+        when('readMapped,
+          when('readNegativeStrand, Strand.REVERSE.toString).otherwise(Strand.FORWARD.toString))
+          .otherwise(Strand.INDEPENDENT.toString)),
+        ignoreNulls = true) over fragmentWindow)
+
+      // Read 2 reference position (contig name)
+      .withColumn("read2contigName",
+      first(when('primaryAlignment and 'readInFragment === 1,
+        when('readMapped, 'contigName).otherwise('sequence)),
+        ignoreNulls = true) over fragmentWindow)
+
+      // Read 2 reference position (5' position)
+      .withColumn("read2fivePrimePosition",
+      first(when('primaryAlignment and 'readInFragment === 1,
+        when('readMapped, 'fivePrimePosition).otherwise(0L)),
+        ignoreNulls = true) over fragmentWindow)
+
+      // Read 2 reference position (strand)
+      .withColumn("read2strand",
+      first(when('primaryAlignment and 'readInFragment === 1,
+        when('readMapped,
+          when('readNegativeStrand, Strand.REVERSE.toString).otherwise(Strand.FORWARD.toString))
+          .otherwise(Strand.INDEPENDENT.toString)),
+        ignoreNulls = true) over fragmentWindow)
+
+
+      // Fragment score
+      .withColumn("score",
+      sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual))) over fragmentWindow)
+  }
+
+  private def addGroupCountInfo(fragmentDf: DataFrame): DataFrame = {
+    import fragmentDf.sparkSession.implicits._
+
+    val groupCountWindow = Window.partitionBy('library, 'read1contigName, 'read1fivePrimePosition, 'read1strand)
+    fragmentDf.withColumn("groupCount",
+      countDistinct('read2contigName, 'read2fivePrimePosition, 'read2strand)
+        .over(groupCountWindow))
+  }
+
+  private def identifyDuplicates(alignmentDf: DataFrame): DataFrame = {
+    import alignmentDf.sparkSession.implicits._
+
+    val positionWindow = Window.partitionBy(
+      'library,
+      'read1contigName, 'read1fivePrimePosition, 'read1strand,
+      'read2contigName, 'read2fivePrimePosition, 'read2strand)
+      .orderBy('score.desc)
+
+    alignmentDf
+        .withColumn("topScoringFragment",
+          functions.rank.over(positionWindow) === 1
+            and 'readName === first('readName).over(positionWindow)
+            and 'recordGroupName === first('recordGroupName).over(positionWindow))
+
+      .withColumn("duplicateFragment",
+        !'topScoringFragment
+          or ('read2contigName.isNull and 'read2fivePrimePosition.isNull and 'read2strand.isNull and 'groupCount > 0))
+      .withColumn("duplicateRead", 'readMapped and (!'primaryAlignment or 'duplicateFragment))
+      .drop('duplicateFragment)
   }
 
   /**
