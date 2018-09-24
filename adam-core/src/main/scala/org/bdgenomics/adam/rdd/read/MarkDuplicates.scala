@@ -137,8 +137,13 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
     val fragmentWindow = Window.partitionBy('recordGroupName, 'readName)
 
-    // Read 1 reference position (contig name)
-    alignmentRecords.withColumn("read1contigName",
+
+    alignmentRecords
+      .withColumn("fivePrimePosition",
+        fivePrimePositionUDF('readMapped, 'readNegativeStrand, 'cigar, 'start, 'end))
+
+      // Read 1 reference position (contig name)
+      .withColumn("read1contigName",
       first(when('primaryAlignment and 'readInFragment === 0,
         when('readMapped, 'contigName).otherwise('sequence)),
         ignoreNulls = true) over fragmentWindow)
@@ -177,7 +182,6 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
           .otherwise(Strand.INDEPENDENT.toString)),
         ignoreNulls = true) over fragmentWindow)
 
-
       // Fragment score
       .withColumn("score",
       sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual))) over fragmentWindow)
@@ -206,12 +210,10 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
           functions.rank.over(positionWindow) === 1
             and 'readName === first('readName).over(positionWindow)
             and 'recordGroupName === first('recordGroupName).over(positionWindow))
-
       .withColumn("duplicateFragment",
         !'topScoringFragment
           or ('read2contigName.isNull and 'read2fivePrimePosition.isNull and 'read2strand.isNull and 'groupCount > 0))
       .withColumn("duplicateRead", 'readMapped and (!'primaryAlignment or 'duplicateFragment))
-      .drop('duplicateFragment)
   }
 
   /**
