@@ -96,7 +96,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
     val fragmentsDf = addFragmentInfo(alignmentRecords)
       .join(libDf, "recordGroupName")
 
-    val groupCountedDf = addGroupCountInfo(fragmentsDf)
+    val groupCountedDf = calculateGroupCounts(fragmentsDf)
 
     identifyDuplicates(groupCountedDf)
       .as[AlignmentRecordProduct]
@@ -137,54 +137,53 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
     val fragmentWindow = Window.partitionBy('recordGroupName, 'readName)
 
-
     alignmentRecords
       .withColumn("fivePrimePosition",
         fivePrimePositionUDF('readMapped, 'readNegativeStrand, 'cigar, 'start, 'end))
 
       // Read 1 reference position (contig name)
       .withColumn("read1contigName",
-      first(when('primaryAlignment and 'readInFragment === 0,
-        when('readMapped, 'contigName).otherwise('sequence)),
-        ignoreNulls = true) over fragmentWindow)
+        first(when('primaryAlignment and 'readInFragment === 0,
+          when('readMapped, 'contigName).otherwise('sequence)),
+          ignoreNulls = true) over fragmentWindow)
 
       // Read 1 reference position (5' position)
       .withColumn("read1fivePrimePosition",
-      first(when('primaryAlignment and 'readInFragment === 0,
-        when('readMapped, 'fivePrimePosition).otherwise(0L)),
-        ignoreNulls = true) over fragmentWindow)
+        first(when('primaryAlignment and 'readInFragment === 0,
+          when('readMapped, 'fivePrimePosition).otherwise(0L)),
+          ignoreNulls = true) over fragmentWindow)
 
       // Read 1 reference position (strand)
       .withColumn("read1strand",
-      first(when('primaryAlignment and 'readInFragment === 0,
-        when('readMapped,
-          when('readNegativeStrand, Strand.REVERSE.toString).otherwise(Strand.FORWARD.toString))
-          .otherwise(Strand.INDEPENDENT.toString)),
-        ignoreNulls = true) over fragmentWindow)
+        first(when('primaryAlignment and 'readInFragment === 0,
+          when('readMapped,
+            when('readNegativeStrand, Strand.REVERSE.toString).otherwise(Strand.FORWARD.toString))
+            .otherwise(Strand.INDEPENDENT.toString)),
+          ignoreNulls = true) over fragmentWindow)
 
       // Read 2 reference position (contig name)
       .withColumn("read2contigName",
-      first(when('primaryAlignment and 'readInFragment === 1,
-        when('readMapped, 'contigName).otherwise('sequence)),
-        ignoreNulls = true) over fragmentWindow)
+        first(when('primaryAlignment and 'readInFragment === 1,
+          when('readMapped, 'contigName).otherwise('sequence)),
+          ignoreNulls = true) over fragmentWindow)
 
       // Read 2 reference position (5' position)
       .withColumn("read2fivePrimePosition",
-      first(when('primaryAlignment and 'readInFragment === 1,
-        when('readMapped, 'fivePrimePosition).otherwise(0L)),
-        ignoreNulls = true) over fragmentWindow)
+        first(when('primaryAlignment and 'readInFragment === 1,
+          when('readMapped, 'fivePrimePosition).otherwise(0L)),
+          ignoreNulls = true) over fragmentWindow)
 
       // Read 2 reference position (strand)
       .withColumn("read2strand",
-      first(when('primaryAlignment and 'readInFragment === 1,
-        when('readMapped,
-          when('readNegativeStrand, Strand.REVERSE.toString).otherwise(Strand.FORWARD.toString))
-          .otherwise(Strand.INDEPENDENT.toString)),
-        ignoreNulls = true) over fragmentWindow)
+        first(when('primaryAlignment and 'readInFragment === 1,
+          when('readMapped,
+            when('readNegativeStrand, Strand.REVERSE.toString).otherwise(Strand.FORWARD.toString))
+            .otherwise(Strand.INDEPENDENT.toString)),
+          ignoreNulls = true) over fragmentWindow)
 
       // Fragment score
       .withColumn("score",
-      sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual))) over fragmentWindow)
+        sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual))) over fragmentWindow)
   }
 
   private def addGroupCountInfo(fragmentDf: DataFrame): DataFrame = {
@@ -206,10 +205,10 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
       .orderBy('score.desc)
 
     alignmentDf
-        .withColumn("topScoringFragment",
-          functions.rank.over(positionWindow) === 1
-            and 'readName === first('readName).over(positionWindow)
-            and 'recordGroupName === first('recordGroupName).over(positionWindow))
+      .withColumn("topScoringFragment",
+        functions.rank.over(positionWindow) === 1
+          and 'readName === first('readName).over(positionWindow)
+          and 'recordGroupName === first('recordGroupName).over(positionWindow))
       .withColumn("duplicateFragment",
         !'topScoringFragment
           or ('read2contigName.isNull and 'read2fivePrimePosition.isNull and 'read2strand.isNull and 'groupCount > 0))
