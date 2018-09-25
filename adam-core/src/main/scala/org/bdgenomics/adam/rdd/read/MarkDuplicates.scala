@@ -94,7 +94,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
     val libDf = libraryDf(recordGroupDictionary, alignmentRecords.sparkSession)
 
     val fragmentsDf = addFragmentInfo(alignmentRecords)
-      .join(libDf, "recordGroupName")
+      .join(libDf, Seq("recordGroupName"), "left")
 
     val groupCountedDf = calculateGroupCounts(fragmentsDf)
 
@@ -141,6 +141,11 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
       .withColumn("fivePrimePosition",
         fivePrimePositionUDF('readMapped, 'readNegativeStrand, 'cigar, 'start, 'end))
 
+      // Fragment score
+      .withColumn("score",
+        sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual)))
+          over fragmentWindow)
+
       // Read 1 reference position (contig name)
       .withColumn("read1contigName",
         first(when('primaryAlignment and 'readInFragment === 0,
@@ -180,10 +185,6 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
             when('readNegativeStrand, Strand.REVERSE.toString).otherwise(Strand.FORWARD.toString))
             .otherwise(Strand.INDEPENDENT.toString)),
           ignoreNulls = true) over fragmentWindow)
-
-      // Fragment score
-      .withColumn("score",
-        sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual)).otherwise(0)) over fragmentWindow)
   }
 
   private def addGroupCountInfo(fragmentDf: DataFrame): DataFrame = {
