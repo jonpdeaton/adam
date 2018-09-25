@@ -250,7 +250,8 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
     import fragments.sparkSession.implicits._
 
     val fragmentDf = addFragmentInfo(fragments, recordGroups)
-    val markedFragmentsDs = identifyDuplicateFragments(fragmentDf)
+    val withGroupCountDf = calculateGroupCounts(fragmentDf)
+    val markedFragmentsDs = identifyDuplicateFragments(withGroupCountDf)
 
     // update the field within the reads to reflect the identified duplicate reads
     updateDuplicateAlignments(markedFragmentsDs)
