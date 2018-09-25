@@ -183,7 +183,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
       // Fragment score
       .withColumn("score",
-        sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual))) over fragmentWindow)
+        sum(when('readMapped and 'primaryAlignment, scoreReadUDF('qual)).otherwise(0)) over fragmentWindow)
   }
 
   private def addGroupCountInfo(fragmentDf: DataFrame): DataFrame = {
