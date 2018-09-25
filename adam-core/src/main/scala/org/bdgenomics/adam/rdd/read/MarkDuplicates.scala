@@ -213,7 +213,10 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
       .withColumn("duplicateFragment",
         !'topScoringFragment
           or ('read2contigName.isNull and 'read2fivePrimePosition.isNull and 'read2strand.isNull and 'groupCount > 0))
-      .withColumn("duplicateRead", 'readMapped and (!'primaryAlignment or 'duplicateFragment))
+      .withColumn("duplicateRead",
+        'read1contigName.isNotNull and 'read1fivePrimePosition.isNotNull and 'read1strand.isNotNull
+          and
+          'readMapped and (!'primaryAlignment or 'duplicateFragment))
   }
 
   /**
