@@ -264,7 +264,11 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
       val bucket = SingleReadBucket(fragment.toAvro)
       val position = ReferencePositionPair(bucket)
 
-      val recordGroupName: Option[String] = bucket.allReads.headOption.flatMap(r => Some(r.getRecordGroupName))
+      val recordGroupName: Option[String] = bucket.allReads.headOption.flatMap(
+        _.getRecordGroupName match {
+          case null         => None
+          case name: String => Some(name)
+        })
       val library: Option[String] = recordGroupName.flatMap(name => if (name == null) None else recordGroups(name).library)
 
       // reference positions of each read in the fragment
@@ -272,8 +276,7 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
       val read2refPos = position.read2refPos
 
       // tuple that will be turned into a row in the DataFrame
-      (fragment.readName, fragment.instrument, fragment.runId,
-        fragment.fragmentSize, fragment.alignments,
+      (fragment.readName, fragment.instrument, fragment.runId, fragment.fragmentSize, fragment.alignments,
         library, recordGroupName,
         read1refPos.map(_.referenceName), read1refPos.map(_.pos), read1refPos.map(_.strand.toString),
         read2refPos.map(_.referenceName), read2refPos.map(_.pos), read2refPos.map(_.strand.toString),
