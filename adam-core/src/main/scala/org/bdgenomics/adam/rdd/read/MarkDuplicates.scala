@@ -20,15 +20,15 @@ package org.bdgenomics.adam.rdd.read
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.expressions.Window
-import org.bdgenomics.formats.avro.{AlignmentRecord, Fragment}
-import org.apache.spark.sql.functions.{countDistinct, first, rank, row_number, sum, when}
+import org.bdgenomics.formats.avro.{ AlignmentRecord, Fragment }
+import org.apache.spark.sql.functions.{ countDistinct, first, rank, row_number, sum, when }
 import org.bdgenomics.adam.models.RecordGroupDictionary
 import org.bdgenomics.adam.rdd.ADAMContext._
-import org.bdgenomics.adam.rdd.fragment.{DatasetBoundFragmentRDD, FragmentRDD, RDDBoundFragmentRDD}
-import org.bdgenomics.adam.sql.{AlignmentRecord => AlignmentRecordProduct, Fragment => FragmentProduct}
-import org.bdgenomics.formats.avro.{AlignmentRecord, Fragment, Strand}
+import org.bdgenomics.adam.rdd.fragment.{ DatasetBoundFragmentRDD, FragmentRDD, RDDBoundFragmentRDD }
+import org.bdgenomics.adam.sql.{ AlignmentRecord => AlignmentRecordProduct, Fragment => FragmentProduct }
+import org.bdgenomics.formats.avro.{ AlignmentRecord, Fragment, Strand }
 import org.bdgenomics.utils.misc.Logging
-import htsjdk.samtools.{Cigar, CigarElement, CigarOperator, TextCigarCodec}
+import htsjdk.samtools.{ Cigar, CigarElement, CigarOperator, TextCigarCodec }
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.types.StructField
 
@@ -95,13 +95,8 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
 
     val libDf = libraryDf(recordGroupDictionary, alignmentRecords.sparkSession)
 
-    val sc = alignmentRecords.sparkSession.sparkContext
-    val recordGroupMap = sc.broadcast(recordGroupDictionary.recordGroupMap)
-    val libMap = functions.udf((recordGroupName: String) =>
-      recordGroupMap.value.get(recordGroupName).flatMap(_._1.library))
-
     val fragmentsDf = addFragmentInfo(alignmentRecords)
-      .withColumn("library", libMap('recordGroupName))
+      .join(libDf, Seq("recordGroupName"), "left")
 
     val withGroupCountDf = calculateGroupCounts(fragmentsDf)
 
@@ -175,7 +170,13 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
           ignoreNulls = true) over fragmentWindow)
   }
 
-  // todo: document
+  /**
+   * Identifies duplicate alignment records
+   *
+   * @param alignmentDf DataFrame of alignment records
+   * @return DataFrame of alignment records identical to that passed in but with
+   *         duplicated marked in the "duplicateRead" column
+   */
   private def identifyDuplicateAlignments(alignmentDf: DataFrame): DataFrame = {
     import alignmentDf.sparkSession.implicits._
 
@@ -201,8 +202,6 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
       .drop("duplicateFragment")
   }
 
-  private case class Position(contigName: String, fivePrimePosition: Long, strand: String)
-
   /**
    * Calculates the number of distinct right positions for each group of left reference positions
    * and joins this information back with the original DataFrame.
@@ -212,18 +211,22 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
    *         distinct right reference positions among all fragments with the same left reference position as that row
    */
   private def calculateGroupCounts(fragmentDf: DataFrame): DataFrame = {
-    import fragmentDf.sparkSession.implicits._
 
-    val makePosition = functions.udf((contigName: String, fivePrimePosition: Long, strand: String) =>
-      Position(contigName, fivePrimePosition, strand))
+    // count number of distinct right-positions for each left-position
+    val groupCountDf = countRightGroups(fragmentDf)
 
-    val groupCountWindow = Window.partitionBy(
-      'library, 'read1contigName, 'read1fivePrimePosition, 'read1strand)
-
-    fragmentDf.withColumn("groupCount",
-      functions.size( // todo: import size and collect_set (if its faster this way)
-        functions.collect_set(makePosition('read2contigName, 'read2fivePrimePosition, 'read2strand))
-          over groupCountWindow))
+    // join the group count info into the original DataFrame (saving null reference positions
+    fragmentDf.join(groupCountDf,
+      (fragmentDf("library") === groupCountDf("library").alias("library_alias") or
+        (fragmentDf("library").isNull and groupCountDf("library").isNull)) and
+        fragmentDf("read1contigName") === groupCountDf("read1contigName").alias("contigName_alias") and
+        fragmentDf("read1fivePrimePosition") === groupCountDf("read1fivePrimePosition").alias("5P_alias") and
+        fragmentDf("read1strand") === groupCountDf("read1strand").alias("strand_alias"),
+      "left")
+      .drop(groupCountDf("library"))
+      .drop(groupCountDf("read1contigName"))
+      .drop(groupCountDf("read1fivePrimePosition"))
+      .drop(groupCountDf("read1strand"))
   }
 
   /**
@@ -264,11 +267,16 @@ private[rdd] object MarkDuplicates extends Serializable with Logging {
   }
 
   /**
-   * Adds the following fields into the fragment schema to use in the duplicate marking algorithm
-   * todo: document this
-   * @param fragmentDs
-   * @param recordGroups
-   * @return
+   * Adds the following fields into the fragment schema to use in the duplicate marking algorithm:
+   * "library", "recordGroupName",
+   * "read1contigName", "read1fivePrimePosition", "read1strand",
+   * "read2contigName", "read2fivePrimePosition", "read2strand",
+   * "score"
+   *
+   * @param fragmentDs Dataset of Fragments
+   * @param recordGroups mapping from record group name to library
+   * @return DataFrame containing all the same fragments in the input Dataset but
+   *         with the extra fields specified above
    */
   private def addFragmentInfo(fragmentDs: Dataset[FragmentProduct], recordGroups: RecordGroupDictionary): DataFrame = {
     import fragmentDs.sparkSession.implicits._
